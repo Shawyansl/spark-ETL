@@ -1,0 +1,10 @@
+order_id,customer_id,order_date,status,payment_method
+5001,101,2024-06-01,completed,card
+5002,102,2024-06-02,completed,cash
+5003,103,2024-06-03,cancelled,card
+5004,104,2024-06-04,completed,online
+5005,999,2024-06-05,completed,card
+5006,101,2024-06-07,returned,card
+5007,105,2024-06-08,completed,card
+5007,105,2024-06-08,completed,card
+5008,106,2024-06-09,completed,card

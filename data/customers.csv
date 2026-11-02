@@ -1,0 +1,8 @@
+customer_id,full_name,city,signup_date,segment
+101,Alice,Tehran,2024-01-10,Gold
+102,Babak,Shiraz,2024-02-15,Silver
+103,Leila,Tehran,2024-03-03,Gold
+104,Reza,NULL,2024-04-20,Bronze
+105,Neda,Tabriz,2024-05-11,Silver
+106,Sam,Isfahan,invalid-date,Gold
+106,Sam,Isfahan,invalid-date,Gold
