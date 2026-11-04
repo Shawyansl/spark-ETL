@@ -1,6 +1,4 @@
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
-
 from src.cleaning import (
     clean_customers,
     clean_order_items,
@@ -27,7 +25,7 @@ def run_partition_demo() -> None:
         tables = load_data(spark)
         cleaned_customers = clean_customers(tables["customers"])
         cleaned_products = clean_products(tables["products"])
-        cleaned_orders, _, _ = clean_orders(
+        cleaned_orders, quarantine_orders = clean_orders(
             tables["orders"],
             cleaned_customers,
         )
@@ -35,6 +33,7 @@ def run_partition_demo() -> None:
             tables["order_items"],
             cleaned_orders,
             cleaned_products,
+            quarantine_orders,
         )
 
         fact_sales = build_fact_sales(
@@ -44,10 +43,7 @@ def run_partition_demo() -> None:
             cleaned_products,
         )
         sales_with_amounts = add_amounts(fact_sales)
-        completed_sales = sales_with_amounts.filter(
-            F.col("status") == "completed"
-        )
-        daily_revenue = build_reports(completed_sales)["daily_revenue"]
+        daily_revenue = build_reports(sales_with_amounts)["daily_revenue"]
 
         # Inspect the physical plan for this aggregation report.
         print("\nExecution plan for daily_revenue:")

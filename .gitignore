@@ -6,3 +6,7 @@ venv/
 
 # Local Hadoop filesystem checksum sidecars
 *.crc
+
+# Regenerated local run artifacts
+/output/
+/logs/

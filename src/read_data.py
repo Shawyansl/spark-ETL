@@ -2,7 +2,6 @@ from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.types import (
-    DecimalType,
     IntegerType,
     StringType,
     StructField,
@@ -31,9 +30,11 @@ ORDERS_SCHEMA = StructType([
 ORDER_ITEMS_SCHEMA = StructType([
     StructField("order_id", IntegerType(), True),
     StructField("product_id", IntegerType(), True),
-    StructField("quantity", IntegerType(), True),
-    StructField("unit_price", DecimalType(10, 2), True),
-    StructField("discount_pct", DecimalType(10, 4), True),
+    # Preserve numeric source text so cleaning can distinguish malformed values
+    # from missing values and reject values that exceed the supported scale.
+    StructField("quantity", StringType(), True),
+    StructField("unit_price", StringType(), True),
+    StructField("discount_pct", StringType(), True),
 ])
 
 PRODUCTS_SCHEMA = StructType([

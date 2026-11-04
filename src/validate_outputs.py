@@ -1,167 +1,166 @@
 import logging
+from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
-
-from src.write_outputs import OUTPUT_DIR
 from pyspark.sql import functions as F
 
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 logger = logging.getLogger(__name__)
 
-def validate_revenue_reconciliation(
-    completed_sales: DataFrame,
-    total_revenue: DataFrame,
-) -> None:
-    detail_total = (
-        completed_sales
-        .agg(F.sum("net_amount").alias("total"))
-        .first()["total"]
+REQUIRED_COLUMNS = {
+    "cleaned_customers": {"customer_id", "signup_date"},
+    "cleaned_products": {"product_id"},
+    "cleaned_orders": {"order_id", "customer_id", "order_date", "status"},
+    "cleaned_order_items": {"order_id", "product_id", "quantity", "unit_price", "discount_pct"},
+    "quarantine_customers": {"customer_id", "reject_reason"},
+    "quarantine_products": {"product_id", "reject_reason"},
+    "quarantine_orders": {"order_id", "reject_reason"},
+    "quarantine_order_items": {"order_id", "product_id", "reject_reason"},
+    "fact_sales": {"order_id", "order_month", "net_amount", "status"},
+    "total_revenue": {"total_net_revenue"},
+    "daily_revenue": {"order_date", "net_revenue"},
+    "category_revenue": {"category", "net_revenue"},
+    "city_revenue": {"city", "net_revenue"},
+    "completed_orders_per_day": {"order_date", "completed_orders"},
+    "top_customers": {"customer_id", "net_revenue"},
+}
+
+
+def _examples(df: DataFrame, columns: list[str]) -> list:
+    return df.select(*columns).limit(5).collect()
+
+
+def validate_unique_key(df: DataFrame, key: str, label: str) -> None:
+    nulls = df.filter(F.col(key).isNull()).limit(1).count()
+    duplicates = df.groupBy(key).count().filter(F.col("count") > 1).limit(5).collect()
+    if nulls or duplicates:
+        raise ValueError(f"{label}.{key} must be non-null and unique; duplicates={duplicates}, nulls={nulls}")
+    logger.info("Passed %s.%s uniqueness/non-null check", label, key)
+
+
+def validate_sales_values(fact_sales: DataFrame) -> None:
+    invalid = fact_sales.filter(
+        F.col("quantity").isNull() | (F.col("quantity") <= 0)
+        | F.col("unit_price").isNull() | (F.col("unit_price") < 0)
     )
+    rows = _examples(invalid, ["order_id", "product_id", "quantity", "unit_price"])
+    if rows:
+        raise ValueError(f"Invalid quantity/unit_price in fact_sales: {rows}")
+    logger.info("Passed sales quantity and price validation")
 
-    report_total = total_revenue.first()["total_net_revenue"]
-
-    if detail_total is None:
-        detail_total = 0
-
-    if report_total is None:
-        report_total = 0
-
-    if detail_total != report_total:
-        raise ValueError(
-            f"Revenue mismatch: completed sales total={detail_total}, "
-            f"reported total={report_total}"
-        )
-
-    logger.info("Passed revenue reconciliation: %s", detail_total)
-
-def validate_sales_references(
-    fact_sales: DataFrame,
-    cleaned_customers: DataFrame,
-    cleaned_products: DataFrame,
-) -> None:
-    customer_keys = cleaned_customers.select("customer_id").distinct()
-    invalid_customers = (
-        fact_sales.select("customer_id")
-        .distinct()
-        .join(customer_keys, on="customer_id", how="left_anti")
-        .limit(5)
-        .collect()
-    )
-
-    if invalid_customers:
-        raise ValueError(
-            f"Unknown customer_id values in fact_sales: {invalid_customers}"
-        )
-
-    product_keys = cleaned_products.select("product_id").distinct()
-    invalid_products = (
-        fact_sales.select("product_id")
-        .distinct()
-        .join(product_keys, on="product_id", how="left_anti")
-        .limit(5)
-        .collect()
-    )
-
-    if invalid_products:
-        raise ValueError(
-            f"Unknown product_id values in fact_sales: {invalid_products}"
-        )
-
-    logger.info("Passed sales customer/product reference validation")
-
-def validate_completed_sales_only(completed_sales: DataFrame) -> None:
-    invalid_rows = completed_sales.filter(
-        F.col("status").isNull()
-        | (F.col("status") != "completed")
-    )
-
-    examples = invalid_rows.select("order_id", "status").limit(5).collect()
-
-    if examples:
-        raise ValueError(
-            f"Non-completed orders found in revenue input: {examples}"
-        )
-
-    logger.info("Passed completed-sales status validation")
 
 def validate_discount_range(fact_sales: DataFrame) -> None:
-    invalid_rows = fact_sales.filter(
+    invalid = fact_sales.filter(
         F.col("discount_pct").isNull()
         | (F.col("discount_pct") < 0)
         | (F.col("discount_pct") > 1)
     )
-
-    examples = invalid_rows.select(
-        "order_id",
-        "product_id",
-        "discount_pct",
-    ).limit(5).collect()
-
-    if examples:
-        raise ValueError(
-            f"discount_pct outside [0, 1] in fact_sales: {examples}"
-        )
-
+    rows = _examples(invalid, ["order_id", "product_id", "discount_pct"])
+    if rows:
+        raise ValueError(f"discount_pct outside [0, 1] in fact_sales: {rows}")
     logger.info("Passed discount_pct range validation")
 
-def validate_sales_values(fact_sales: DataFrame) -> None:
-    invalid_rows = fact_sales.filter(
-        (F.col("quantity") <= 0) | (F.col("unit_price") < 0)
+
+def validate_clean_references(
+    cleaned_orders: DataFrame,
+    cleaned_customers: DataFrame,
+    cleaned_order_items: DataFrame,
+    cleaned_products: DataFrame,
+) -> None:
+    relationships = [
+        (cleaned_orders, "customer_id", cleaned_customers, "customer_id", "orders.customer_id"),
+        (cleaned_order_items, "order_id", cleaned_orders, "order_id", "order_items.order_id"),
+        (cleaned_order_items, "product_id", cleaned_products, "product_id", "order_items.product_id"),
+    ]
+    for child, fk, parent, pk, label in relationships:
+        parent_keys = parent.select(F.col(pk).alias("_parent_key")).distinct()
+        invalid = child.filter(F.col(fk).isNull()).limit(5).collect()
+        if not invalid:
+            invalid = child.join(
+                parent_keys, child[fk] == parent_keys["_parent_key"], "left_anti"
+            ).limit(5).collect()
+        if invalid:
+            raise ValueError(f"Invalid reference {label}; examples: {invalid}")
+    logger.info("Passed cleaned customer/order/product reference validation")
+
+
+
+def validate_fact_grain(
+    fact_sales: DataFrame,
+    cleaned_order_items: DataFrame,
+    cleaned_orders: DataFrame,
+    cleaned_customers: DataFrame,
+    cleaned_products: DataFrame,
+) -> None:
+    expected_lines = cleaned_order_items.count()
+    actual_rows = fact_sales.count()
+    duplicate_lines = (
+        fact_sales.groupBy("order_id", "product_id")
+        .count().filter(F.col("count") != 1).limit(5).collect()
     )
-
-    examples = invalid_rows.select(
-        "order_id",
-        "product_id",
-        "quantity",
-        "unit_price",
-    ).limit(5).collect()
-
-    if examples:
+    if expected_lines != actual_rows or duplicate_lines:
         raise ValueError(
-            f"Invalid quantity or unit_price found in fact_sales: {examples}"
+            f"Fact grain mismatch: {expected_lines} cleaned lines, "
+            f"{actual_rows} fact rows; duplicate keys={duplicate_lines}"
         )
 
-    logger.info("Passed quantity and unit_price validation")
-
-
-def validate_unique_customer_ids(customers: DataFrame) -> None:
-    duplicate_keys = (
-        customers
-        .groupBy("customer_id")
-        .count()
-        .filter(F.col("count") > 1)
-    )
-
-    duplicates = duplicate_keys.limit(5).collect()
-
-    if duplicates:
-        duplicate_ids = [row["customer_id"] for row in duplicates]
-        raise ValueError(
-            f"Duplicate customer_id values in cleaned_customers: {duplicate_ids}"
-        )
-
-    logger.info("Passed customer_id uniqueness check")
-
-
-def validate_outputs(spark: SparkSession, expected_outputs: dict[str, DataFrame]) -> None:
-    for name, expected_df in expected_outputs.items():
-        path = OUTPUT_DIR / name
-
-        if not (path / "_SUCCESS").exists():
-            raise RuntimeError(f"Output is missing or incomplete: {path}")
-
-        actual_df = spark.read.parquet(str(path))
-
-        expected_count = expected_df.count()
-        actual_count = actual_df.count()
-
-        if actual_count != expected_count:
+    relationships = [
+        (fact_sales, "order_id", cleaned_orders, "order_id"),
+        (fact_sales, "customer_id", cleaned_customers, "customer_id"),
+        (fact_sales, "product_id", cleaned_products, "product_id"),
+    ]
+    for child, fk, parent, pk in relationships:
+        parent_keys = parent.select(F.col(pk).alias("_parent_key")).distinct()
+        invalid = child.filter(F.col(fk).isNull()).limit(5).collect()
+        if not invalid:
+            invalid = child.join(
+                parent_keys, child[fk] == parent_keys["_parent_key"], "left_anti"
+            ).limit(5).collect()
+        if invalid:
             raise ValueError(
-                f"Row count mismatch for {name}: "
-                f"expected {expected_count}, found {actual_count}"
+                f"Persisted fact has invalid {fk} reference; examples: {invalid}"
             )
+    logger.info("Passed persisted fact grain and reference validation")
 
-        logger.info(
-            "Validated output %s: %d rows",
-            name,
-            actual_count,
+
+def validate_completed_reports(
+    fact_sales: DataFrame,
+    reports: dict[str, DataFrame],
+) -> None:
+    completed = fact_sales.filter(F.col("status") == "completed")
+    expected_total = completed.agg(
+        F.coalesce(F.sum("net_amount"), F.lit(0)).alias("total")
+    ).first()["total"]
+    report_total = reports["total_revenue"].first()["total_net_revenue"]
+    if expected_total != report_total:
+        raise ValueError(
+            f"Completed revenue mismatch: fact={expected_total}, report={report_total}"
         )
+    logger.info("Passed completed-only revenue reconciliation: %s", expected_total)
+
+
+def validate_revenue_reconciliation(reports: dict[str, DataFrame]) -> None:
+    total = reports["total_revenue"].first()["total_net_revenue"]
+    for name in ("daily_revenue", "category_revenue", "city_revenue"):
+        subtotal = reports[name].agg(F.coalesce(F.sum("net_revenue"), F.lit(0))).first()[0]
+        if subtotal != total:
+            raise ValueError(f"{name} does not reconcile to total_revenue: {subtotal} != {total}")
+    logger.info("Passed daily/category/city revenue reconciliation")
+
+
+def validate_outputs(spark: SparkSession, output_names: list[str]) -> dict[str, DataFrame]:
+    """Read persisted outputs and validate completion markers and required columns."""
+    persisted = {}
+    for name in output_names:
+        path = OUTPUT_DIR / name
+        if not (path / "_SUCCESS").is_file():
+            raise RuntimeError(f"Output is missing or incomplete: {path}")
+        actual = spark.read.parquet(str(path))
+        required = REQUIRED_COLUMNS.get(name, set())
+        missing = required - set(actual.columns)
+        if missing:
+            raise ValueError(f"Output {name} is missing columns: {sorted(missing)}")
+        row_count = actual.count()
+        persisted[name] = actual
+        logger.info("Validated persisted output %s: %d rows", name, row_count)
+    return persisted

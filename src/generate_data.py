@@ -2,7 +2,6 @@ import csv
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-DATA_DIR.mkdir(exist_ok=True)
 
 # NULL is written as the literal text "NULL", like in the PDF.
 # In Spark: spark.read.option("nullValue", "NULL")
@@ -61,10 +60,18 @@ FILES = {
     ),
 }
 
-for name, (header, rows) in FILES.items():
-    path = DATA_DIR / name
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(rows)
-    print(f"{name}: {len(rows)} rows -> {path}")
+
+def generate_data() -> None:
+    """Overwrite the four CSV fixtures with the built-in teaching dataset."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    for name, (header, rows) in FILES.items():
+        path = DATA_DIR / name
+        with open(path, "w", newline="", encoding="utf-8") as file_obj:
+            writer = csv.writer(file_obj, lineterminator="\n")
+            writer.writerow(header)
+            writer.writerows(rows)
+        print(f"{name}: {len(rows)} rows -> {path}")
+
+
+if __name__ == "__main__":
+    generate_data()
